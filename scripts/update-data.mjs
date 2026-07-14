@@ -17,6 +17,28 @@ const startDate = '2024-09-24';
 const oneYearAgo = new Date();
 oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
 const oneYearStart = isoDate(oneYearAgo);
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+async function fetchJson(url) {
+  let lastError;
+  for (let attempt = 1; attempt <= 4; attempt++) {
+    try {
+      const response = await fetch(url, {
+        headers: {
+          Referer: 'https://fundf10.eastmoney.com/',
+          'User-Agent': 'fund-analysis-dashboard/1.0'
+        },
+        signal: AbortSignal.timeout(30000)
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return await response.json();
+    } catch (error) {
+      lastError = error;
+      if (attempt < 4) await sleep(500 * 2 ** (attempt - 1));
+    }
+  }
+  throw lastError;
+}
 
 async function fetchFund(code, name) {
   const entries = [];
@@ -24,12 +46,7 @@ async function fetchFund(code, name) {
     const url = new URL('https://api.fund.eastmoney.com/f10/lsjz');
     Object.entries({fundCode: code, pageIndex: page, pageSize: 20, startDate, endDate})
       .forEach(([key, value]) => url.searchParams.set(key, value));
-    const response = await fetch(url, {
-      headers: {Referer: 'https://fundf10.eastmoney.com/'},
-      signal: AbortSignal.timeout(15000)
-    });
-    if (!response.ok) throw new Error(`${code} returned HTTP ${response.status}`);
-    const json = await response.json();
+    const json = await fetchJson(url);
     const list = json.Data?.LSJZList || [];
     entries.push(...list);
     const total = Number(json.TotalCount || json.Data?.TotalCount || 0);
@@ -43,7 +60,11 @@ async function fetchFund(code, name) {
   return {code, name, points};
 }
 
-const settled = await Promise.allSettled(funds.map(([code, name]) => fetchFund(code, name)));
+const settled = [];
+for (let offset = 0; offset < funds.length; offset += 4) {
+  const batch = funds.slice(offset, offset + 4);
+  settled.push(...await Promise.allSettled(batch.map(([code, name]) => fetchFund(code, name))));
+}
 const failures = settled.filter(result => result.status === 'rejected');
 if (failures.length) {
   throw new Error(`Update aborted; ${failures.length} fund(s) failed: ${failures.map(x => x.reason.message).join('; ')}`);
